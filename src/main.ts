@@ -2,23 +2,15 @@ import {
 	App,
 	Editor,
 	MarkdownView,
-	Modal,
 	normalizePath,
-	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
 	TFile,
-	View,
 } from "obsidian";
 
-import * as YAML from "js-yaml";
+import { diff } from "fast-myers-diff";
 
-// Remember to rename these classes and interfaces!
-
-// TODO:
-// - for each edited line, add a timestamp to YAML frontmatter.
-// - upon page load, add timestamps to DOM rather than md: Plugin with JavaScript DOM Manipulation
 /*
 const addTimestamp = (lineElement, timestamp) => {
   // Create an uneditable span for the timestamp
@@ -37,24 +29,40 @@ const addTimestamp = (lineElement, timestamp) => {
 };
 */
 
-interface MyPluginSettings {
+// CHALLENGES:
+// - when lines below are pushed down, all subsequent timestamps need to be updated. (hash)
+// - hashed lines need to also store order, since multiple lines can have the same hash.
+// - only write to file if there is difference in minute and hour of time to last write.
+// - deleted lines should be removed from hash.
+
+// - maybe compare entire file each time to check for changes, then update timestamps.
+// - then we're using myers diff. try to implement it.
+
+// figure out diff.
+// store a diff on file load.
+// on file change, check diff. if changes, check timestamps. if timestamps changed, write.
+
+// - optimize:
+// - store timestamps for each line and paragraph. if a line inside a paragraph is edited, break paragraph timestamps.
+
+interface TimestampsSettings {
 	timestampLogLocation: string;
 }
 
-type Timestamps = {
+type TimestampsType = {
 	[fileName: string]: {
 		[lineNumber: number]: string;
 	};
 };
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
+const DEFAULT_SETTINGS: TimestampsSettings = {
 	timestampLogLocation: "/.timestamps/",
 };
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
-	updatedTimestamp: boolean;
-	updateTimer?: NodeJS.Timeout;
+export default class Timestamps extends Plugin {
+	settings: TimestampsSettings;
+	canSaveCache: boolean;
+	saveCacheTimer?: NodeJS.Timeout;
 
 	METADATA_DIR = normalizePath(".timestamps/plugin-data/");
 	METADATA_FILE = normalizePath(`${this.METADATA_DIR}/timestamps.json`);
@@ -62,82 +70,21 @@ export default class MyPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		this.updatedTimestamp = false;
-		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-		const timeStamps = await this.loadMetadata();
-		console.log(timeStamps);
-		if (view) this.overlayTimestamps(view, timeStamps); //TODO: run in its own view onload. currently only gets called when plugin reloads bc view doesn't exist on first load.
+		this.canSaveCache = false;
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon(
-			"dice",
-			"Sample Plugin",
-			(evt: MouseEvent) => {
-				// Called when the user clicks the icon.
-				new Notice("This is a notice!");
-			}
-		);
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass("my-plugin-ribbon-class");
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText("Status Bar Text");
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: "open-sample-modal-simple",
-			name: "Open sample modal (simple)",
-			callback: () => {
-				new SampleModal(this.app).open();
-			},
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: "sample-editor-command",
-			name: "Sample editor command",
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection("Sample Editor Command");
-			},
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: "open-sample-modal-complex",
-			name: "Open sample modal (complex)",
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView =
-					this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			},
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, "click", (evt: MouseEvent) => {
-			console.log("click", evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(
-			window.setInterval(() => console.log("setInterval"), 5 * 60 * 1000)
-		);
+		this.addSettingTab(new TimestampSettingsTab(this.app, this));
 
 		this.registerEvent(
 			this.app.workspace.on("editor-change", this.handleEditorChange)
+		);
+		this.registerEvent(
+			this.app.workspace.on("file-open", async (file: TFile) => {
+				const timeStamps = await this.loadMetadata();
+				console.log(timeStamps);
+				const view =
+					this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (view) this.overlayTimestamps(view, timeStamps); //TODO: run in its own view onload. currently only gets called when plugin reloads bc view doesn't exist on first load.
+			})
 		);
 	}
 
@@ -211,30 +158,31 @@ export default class MyPlugin extends Plugin {
 
 	handleEditorChange = async (editor: Editor) => {
 		const file = this.app.workspace.getActiveFile();
-		if (!this.updatedTimestamp && file) {
+		console.log("path", file?.path);
+		// if (!this.canSaveCache && file) {
+		if (file) {
 			const { line } = editor.getCursor("from");
 			await this.updateLineTimestamp(
 				file.path,
 				line,
 				new Date().toISOString()
 			);
-			this.updatedTimestamp = true;
+			// this.canSaveCache = true;
 
 			// TODO: make timestamp update based on edit end, rather than timer.
-			if (!this.updateTimer) {
-				this.updateTimer = setTimeout(() => {
-					console.log("timer expired", this.updateTimer);
-					this.updatedTimestamp = false;
-					this.updateTimer = undefined;
-				}, 2000);
-				console.log("timer created", this.updateTimer);
-			}
+			// TODO: save timestamps to cache, reset timer on cache change. when timer hits end, save to file.
+			// if (!this.saveCacheTimer) {
+			// 	this.saveCacheTimer = setTimeout(() => {
+			// 		console.log("timer expired", this.saveCacheTimer);
+			// 		this.canSaveCache = false;
+			// 		this.saveCacheTimer = undefined;
+			// 	}, 2000);
+			// 	console.log("timer created", this.saveCacheTimer);
+			// }
 		}
 	};
 
-	// Function to overlay timestamps on the editor
-	overlayTimestamps(view: MarkdownView, timestamps: Timestamps) {
-		// Remove any existing overlay container
+	overlayTimestamps(view: MarkdownView, timestamps: TimestampsType) {
 		console.log("overlaying", timestamps);
 		let existingOverlay = document.querySelector(
 			".timestamp-overlay-container"
@@ -243,7 +191,7 @@ export default class MyPlugin extends Plugin {
 			existingOverlay.remove();
 		}
 
-		// Create a container for all timestamp overlays
+		// container to store timestamp overlays
 		const overlayContainer = document.createElement("div");
 		overlayContainer.className = "timestamp-overlay-container";
 		overlayContainer.style.position = "absolute";
@@ -307,26 +255,10 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class TimestampSettingsTab extends PluginSettingTab {
+	plugin: Timestamps;
 
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.setText("Woah!");
-	}
-
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: Timestamps) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
