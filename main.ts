@@ -203,7 +203,10 @@ export default class MyPlugin extends Plugin {
 		metadata[filePath][lineNumber.toString()] = timestamp;
 
 		await this.saveMetadata(metadata);
-		this.overlayTimestamps(this.app.workspace.getActiveViewOfType(MarkdownView)!, metadata);
+		this.overlayTimestamps(
+			this.app.workspace.getActiveViewOfType(MarkdownView)!,
+			metadata
+		);
 	}
 
 	handleEditorChange = async (editor: Editor) => {
@@ -217,19 +220,20 @@ export default class MyPlugin extends Plugin {
 			);
 			this.updatedTimestamp = true;
 
+			// TODO: make timestamp update based on edit end, rather than timer.
 			if (!this.updateTimer) {
 				this.updateTimer = setTimeout(() => {
 					console.log("timer expired", this.updateTimer);
 					this.updatedTimestamp = false;
 					this.updateTimer = undefined;
-				}, 10000);
+				}, 2000);
 				console.log("timer created", this.updateTimer);
 			}
 		}
 	};
 
 	// Function to overlay timestamps on the editor
-	overlayTimestamps(view: View, timestamps: Timestamps) {
+	overlayTimestamps(view: MarkdownView, timestamps: Timestamps) {
 		// Remove any existing overlay container
 		console.log("overlaying", timestamps);
 		let existingOverlay = document.querySelector(
@@ -255,16 +259,22 @@ export default class MyPlugin extends Plugin {
 		// line position is line.getBoundingClientRect().too -  (40 vertically aligned middle, 36 vertically aligned bottom of text)  and left is arbitrary.
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i] as HTMLElement;
+			const lineText = view.editor.getLine(i);
 			const lineCoords = line.getBoundingClientRect();
 			const fileName = this.app.workspace.getActiveFile()?.name;
-			console.log(fileName);
+			console.log("file, text", fileName, lineText);
 			if (!fileName) return;
 			const timestamp = timestamps[fileName][i];
 			console.log(i, line, lineCoords, timestamp);
-			if (timestamp) {
+			if (timestamp && lineText) {
 				const timestampElement = document.createElement("div");
 				timestampElement.className = "timestamp-overlay";
-				timestampElement.textContent = (new Date(timestamp)).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+				timestampElement.textContent = new Date(
+					timestamp
+				).toLocaleTimeString("en-US", {
+					hour: "2-digit",
+					minute: "2-digit",
+				});
 				timestampElement.style.position = "absolute";
 				timestampElement.style.pointerEvents = "none";
 				timestampElement.style.opacity = "0.7";
